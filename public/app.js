@@ -1,59 +1,131 @@
+
 const $=s=>document.querySelector(s);
 const $$=s=>[...document.querySelectorAll(s)];
+
 let settings={},tests=[],selected=new Set(),adminToken='',adminData=null;
 
 const money=n=>'₹'+Number(n||0).toLocaleString('en-IN');
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
 async function api(url,opts={}){
-  const headers={'Content-Type':'application/json',...(opts.headers||{})};
+  const headers={...(opts.headers||{})};
+
+  // FormData भेजते समय Content-Type खुद browser सेट करेगा
+  if(!(opts.body instanceof FormData)){
+    headers['Content-Type']='application/json';
+  }
+
   if(adminToken)headers.Authorization='Bearer '+adminToken;
+
   const r=await fetch(url,{...opts,headers});
   const data=await r.json().catch(()=>({}));
+
   if(!r.ok)throw new Error(data.error||'कुछ गड़बड़ हो गई');
   return data;
 }
 
+function showMessage(t,c){
+  $('#message').className=c||'';
+  $('#message').textContent=t;
+}
+
+function notice(t,c){
+  $('#adminNotice').textContent=t;
+  $('#adminNotice').className=c||'';
+}
+
 async function loadPublic(){
   let d;
+
   try{
     d=await api('/api/public');
-    settings=d.settings;
-    tests=d.tests;
-    try{localStorage.setItem('sigmaPublicCache',JSON.stringify(d));}catch{}
+    settings=d.settings||{};
+    tests=d.tests||[];
+
+    try{
+      localStorage.setItem('sigmaPublicCache',JSON.stringify(d));
+    }catch{}
   }catch(err){
     let cached=null;
-    try{cached=JSON.parse(localStorage.getItem('sigmaPublicCache')||'null');}catch{}
+
+    try{
+      cached=JSON.parse(localStorage.getItem('sigmaPublicCache')||'null');
+    }catch{}
+
     if(!cached)throw err;
+
     d=cached;
-    settings=d.settings;
-    tests=d.tests;
-    showMessage('आप ऑफलाइन हैं। पिछली बार लोड हुई टेस्ट सूची दिखाई जा रही है; नई बुकिंग भेजने के लिए इंटरनेट जरूरी है।','error');
+    settings=d.settings||{};
+    tests=d.tests||[];
+
+    showMessage(
+      'आप ऑफलाइन हैं। पिछली बार लोड हुई टेस्ट सूची दिखाई जा रही है; नई बुकिंग भेजने के लिए इंटरनेट जरूरी है।',
+      'error'
+    );
   }
 
-  document.documentElement.style.setProperty('--accent',settings.accent||'#087f8c');
-  $('#labName').textContent=settings.labName;
-  $('#footerName').textContent=settings.labName;
+  document.documentElement.style.setProperty(
+    '--accent',settings.accent||'#087f8c'
+  );
+
+  $('#labName').textContent=settings.labName||'Sigma Diagnostic';
+  $('#footerName').textContent=settings.labName||'Sigma Diagnostic';
   $('#tagline').textContent=settings.tagline||'';
   $('#logo').textContent=settings.logoText||'SD';
   $('#addressText').textContent=settings.address||'';
   $('#year').textContent=new Date().getFullYear();
-  $('#callLink').textContent=settings.phone?'कॉल करें: '+settings.phone:'संपर्क करें';
-  $('#callLink').href=settings.phone?'tel:'+settings.phone.replace(/[^+\d]/g,''):'#';
+
+  $('#callLink').textContent=settings.phone
+    ?'कॉल करें: '+settings.phone
+    :'संपर्क करें';
+
+  $('#callLink').href=settings.phone
+    ?'tel:'+settings.phone.replace(/[^+\d]/g,'')
+    :'#';
 
   const today=new Date();
-  $('#date').min=new Date(today.getTime()-today.getTimezoneOffset()*60000).toISOString().slice(0,10);
+  $('#date').min=new Date(
+    today.getTime()-today.getTimezoneOffset()*60000
+  ).toISOString().slice(0,10);
 
   renderTests();
   renderSelected();
+  renderPatientQR();
 }
 
-/* TEST SEARCH: बिना सर्च के टेस्ट नहीं दिखेंगे */
+/* मरीजों की वेबसाइट पर QR दिखाना */
+function renderPatientQR(){
+  const section=$('#patientQrSection');
+  const image=$('#patientQrImage');
+  const amount=$('#patientQrAmount');
+
+  if(!section||!image)return;
+
+  const qr=settings.upiQrImage;
+  const enabled=settings.upiQrEnabled===true;
+
+  if(enabled&&qr){
+    image.src=qr;
+    image.alt='Sigma Diagnostic UPI Payment QR';
+    section.classList.remove('hidden');
+
+    if(amount){
+      amount.textContent=
+        'बुकिंग की कुल राशि: '+money(feeTotal().total);
+    }
+  }else{
+    image.removeAttribute('src');
+    section.classList.add('hidden');
+  }
+}
+
+/* TEST SEARCH */
 function renderTests(){
   const q=$('#search').value.trim().toLowerCase();
 
   if(!q){
-    $('#tests').innerHTML='<p class="muted">टेस्ट देखने के लिए ऊपर सर्च बॉक्स में टेस्ट का नाम लिखें, जैसे CBC, LFT या KFT।</p>';
+    $('#tests').innerHTML=
+      '<p class="muted">टेस्ट देखने के लिए ऊपर सर्च बॉक्स में टेस्ट का नाम लिखें, जैसे CBC, LFT या KFT।</p>';
     return;
   }
 
@@ -78,6 +150,7 @@ function renderTests(){
   $$('[data-add]').forEach(b=>b.onclick=()=>{
     const id=b.dataset.add;
     selected.has(id)?selected.delete(id):selected.add(id);
+
     renderTests();
     renderSelected();
   });
@@ -93,7 +166,8 @@ function feeTotal(){
     subtotal,
     booking:Number(settings.bookingFee||0),
     collection:home?Number(settings.homeCollectionFee||0):0,
-    total:subtotal+Number(settings.bookingFee||0)+(home?Number(settings.homeCollectionFee||0):0)
+    total:subtotal+Number(settings.bookingFee||0)+
+      (home?Number(settings.homeCollectionFee||0):0)
   };
 }
 
@@ -119,16 +193,29 @@ function renderSelected(){
     ${x.collection?`<div class="total-row"><span>होम कलेक्शन</span><b>${money(x.collection)}</b></div>`:''}
     <div class="total-row grand"><span>कुल भुगतान</span><b>${money(x.total)}</b></div>`;
 
-  $('#addressWrap').classList.toggle('hidden',$('input[name="collection"]:checked').value!=='home');
-  $('#bookingForm [name="address"]').required=$('input[name="collection"]:checked').value==='home';
+  $('#addressWrap').classList.toggle(
+    'hidden',
+    $('input[name="collection"]:checked').value!=='home'
+  );
+
+  $('#bookingForm [name="address"]').required=
+    $('input[name="collection"]:checked').value==='home';
+
+  renderPatientQR();
 }
 
 $('#search').addEventListener('input',renderTests);
-$$('input[name="collection"]').forEach(x=>x.addEventListener('change',renderSelected));
 
+$$('input[name="collection"]').forEach(x=>
+  x.addEventListener('change',renderSelected)
+);
+
+/* बुकिंग और WhatsApp */
 $('#bookingForm').addEventListener('submit',async e=>{
   e.preventDefault();
-  const f=new FormData(e.target),x=feeTotal();
+
+  const f=new FormData(e.target);
+  const x=feeTotal();
 
   if(!x.chosen.length){
     showMessage('कम से कम एक टेस्ट चुनें।','error');
@@ -157,7 +244,10 @@ $('#bookingForm').addEventListener('submit',async e=>{
     });
 
     const b=result.booking;
-    const testsText=b.tests.map(t=>`• ${t.name} — ${money(t.price)}`).join('\n');
+
+    const testsText=b.tests
+      .map(t=>`• ${t.name} — ${money(t.price)}`)
+      .join('\n');
 
     const msg=`नमस्ते ${result.labName}, मुझे टेस्ट बुक करना है।
 बुकिंग ID: ${result.bookingId}
@@ -178,11 +268,19 @@ ${testsText}
     const raw=result.whatsapp||settings.phone||'';
     const number=raw.replace(/\D/g,'');
 
-    if(number.length<10)throw new Error('Admin Panel में सही WhatsApp नंबर सेट करें।');
+    if(number.length<10){
+      throw new Error('Admin Panel में सही WhatsApp नंबर सेट करें।');
+    }
 
-    const url='https://wa.me/'+(number.length===10?'91'+number:number)+'?text='+encodeURIComponent(msg);
+    const url='https://wa.me/'+
+      (number.length===10?'91'+number:number)+
+      '?text='+encodeURIComponent(msg);
 
-    showMessage('बुकिंग रिक्वेस्ट सेव हो गई। WhatsApp खुलेगा—मैसेज भेजने के बाद लैब की पुष्टि का इंतज़ार करें।','success');
+    showMessage(
+      'बुकिंग रिक्वेस्ट सेव हो गई। WhatsApp खुलेगा—मैसेज भेजने के बाद लैब की पुष्टि का इंतज़ार करें।',
+      'success'
+    );
+
     window.location.href=url;
 
   }catch(err){
@@ -193,11 +291,7 @@ ${testsText}
   }
 });
 
-function showMessage(t,c){
-  $('#message').className=c||'';
-  $('#message').textContent=t;
-}
-
+/* Admin Login */
 $('#adminOpen').onclick=()=>{
   $('#adminModal').classList.remove('hidden');
   $('#loginPane').classList.remove('hidden');
@@ -208,20 +302,27 @@ $('#adminOpen').onclick=()=>{
 $('#closeAdmin').onclick=()=>$('#adminModal').classList.add('hidden');
 
 $('#adminModal').addEventListener('click',e=>{
-  if(e.target.id==='adminModal')$('#adminModal').classList.add('hidden');
+  if(e.target.id==='adminModal'){
+    $('#adminModal').classList.add('hidden');
+  }
 });
 
 $('#loginForm').onsubmit=async e=>{
   e.preventDefault();
+
   try{
     const d=await api('/api/admin/login',{
       method:'POST',
-      body:JSON.stringify({password:new FormData(e.target).get('password')})
+      body:JSON.stringify({
+        password:new FormData(e.target).get('password')
+      })
     });
 
     adminToken=d.token;
+
     $('#loginPane').classList.add('hidden');
     $('#adminPane').classList.remove('hidden');
+
     await loadAdmin();
 
   }catch(err){
@@ -231,21 +332,147 @@ $('#loginForm').onsubmit=async e=>{
 
 async function loadAdmin(){
   adminData=await api('/api/admin/data');
+
   const f=$('#settingsForm');
 
-  for(const [k,v] of Object.entries(adminData.settings)){
-    if(f.elements[k])f.elements[k].value=v;
+  for(const [k,v] of Object.entries(adminData.settings||{})){
+    if(f.elements[k])f.elements[k].value=v??'';
   }
 
   renderAdminTests();
   renderBookings();
+  renderAdminQR();
 }
 
+/* Admin में QR प्रीव्यू */
+function renderAdminQR(){
+  const preview=$('#upiQrPreview');
+  const wrap=$('#upiQrPreviewWrap');
+  const noticeEl=$('#upiQrNotice');
+  const deleteBtn=$('#upiQrDeleteBtn');
+
+  if(!preview||!wrap)return;
+
+  const qr=adminData?.settings?.upiQrImage;
+
+  if(qr){
+    preview.src=qr;
+    preview.alt='Uploaded UPI QR';
+    wrap.classList.remove('hidden');
+    if(deleteBtn)deleteBtn.classList.remove('hidden');
+    if(noticeEl)noticeEl.textContent='UPI QR अपलोड है।';
+  }else{
+    preview.removeAttribute('src');
+    wrap.classList.add('hidden');
+    if(deleteBtn)deleteBtn.classList.add('hidden');
+    if(noticeEl)noticeEl.textContent='अभी कोई QR अपलोड नहीं है।';
+  }
+}
+
+/* UPI QR Upload */
+const qrUploadForm=$('#upiQrUploadForm');
+
+if(qrUploadForm){
+  qrUploadForm.addEventListener('submit',async e=>{
+    e.preventDefault();
+
+    const fileInput=$('#upiQrFile');
+    const file=fileInput?.files?.[0];
+
+    if(!file){
+      qrNotice('पहले QR की इमेज चुनें।','error');
+      return;
+    }
+
+    if(!['image/png','image/jpeg','image/webp'].includes(file.type)){
+      qrNotice('केवल PNG, JPG या WebP इमेज अपलोड करें।','error');
+      return;
+    }
+
+    if(file.size>2*1024*1024){
+      qrNotice('QR इमेज 2 MB से छोटी होनी चाहिए।','error');
+      return;
+    }
+
+    const btn=$('#upiQrUploadBtn');
+    if(btn){
+      btn.disabled=true;
+      btn.textContent='अपलोड हो रहा है…';
+    }
+
+    try{
+      const formData=new FormData();
+      formData.append('qr',file);
+
+      await api('/api/admin/upi-qr',{
+        method:'POST',
+        body:formData
+      });
+
+      await loadAdmin();
+      await loadPublic();
+
+      fileInput.value='';
+      qrNotice('UPI QR सफलतापूर्वक अपलोड हो गया।','success');
+
+    }catch(err){
+      qrNotice(err.message,'error');
+    }finally{
+      if(btn){
+        btn.disabled=false;
+        btn.textContent='QR अपलोड करें';
+      }
+    }
+  });
+}
+
+function qrNotice(t,c){
+  const el=$('#upiQrNotice');
+  if(el){
+    el.textContent=t;
+    el.className=c||'';
+  }
+}
+
+/* UPI QR Delete */
+const qrDeleteBtn=$('#upiQrDeleteBtn');
+
+if(qrDeleteBtn){
+  qrDeleteBtn.addEventListener('click',async()=>{
+    if(!confirm('क्या आप अपलोड किया हुआ UPI QR हटाना चाहते हैं?'))return;
+
+    qrDeleteBtn.disabled=true;
+
+    try{
+      await api('/api/admin/upi-qr',{method:'DELETE'});
+
+      await loadAdmin();
+      await loadPublic();
+
+      qrNotice('UPI QR हटा दिया गया।','success');
+
+    }catch(err){
+      qrNotice(err.message,'error');
+    }finally{
+      qrDeleteBtn.disabled=false;
+    }
+  });
+}
+
+/* Settings Save */
 $('#settingsForm').onsubmit=async e=>{
   e.preventDefault();
-  const f=new FormData(e.target),data={};
 
-  ['labName','tagline','phone','address','bookingFee','homeCollectionFee','logoText','accent'].forEach(k=>data[k]=f.get(k));
+  const f=new FormData(e.target);
+  const data={};
+
+  [
+    'labName','tagline','phone','address',
+    'bookingFee','homeCollectionFee','logoText','accent'
+  ].forEach(k=>data[k]=f.get(k));
+
+  // UPI ID वाला field मौजूद हो तो उसे भी सेव करें
+  if(f.has('upiId'))data.upiId=f.get('upiId');
 
   try{
     await api('/api/admin/settings',{
@@ -255,6 +482,7 @@ $('#settingsForm').onsubmit=async e=>{
 
     await loadPublic();
     await loadAdmin();
+
     notice('सेटिंग्स सेव हो गईं।','success');
 
   }catch(err){
@@ -262,8 +490,10 @@ $('#settingsForm').onsubmit=async e=>{
   }
 };
 
+/* Admin Test Form */
 $('#testForm').onsubmit=async e=>{
   e.preventDefault();
+
   const f=new FormData(e.target);
 
   const data={
@@ -283,8 +513,10 @@ $('#testForm').onsubmit=async e=>{
 
     e.target.reset();
     $('#cancelEdit').classList.add('hidden');
+
     await loadPublic();
     await loadAdmin();
+
     notice('टेस्ट सेव हो गया।','success');
 
   }catch(err){
@@ -298,7 +530,9 @@ $('#cancelEdit').onclick=()=>{
 };
 
 function renderAdminTests(){
-  $('#adminTestsList').innerHTML=adminData.tests.map(t=>`
+  const list=adminData?.tests||[];
+
+  $('#adminTestsList').innerHTML=list.map(t=>`
     <div class="admin-item">
       <div><b>${esc(t.name)}</b><p>${esc(t.category)} · ${money(t.price)}</p></div>
       <div class="small-actions">
@@ -308,7 +542,9 @@ function renderAdminTests(){
     </div>`).join('');
 
   $$('[data-edit]').forEach(b=>b.onclick=()=>{
-    const t=adminData.tests.find(x=>x.id===b.dataset.edit);
+    const t=adminData.tests.find(x=>String(x.id)===b.dataset.edit);
+    if(!t)return;
+
     const f=$('#testForm');
 
     Object.keys(t).forEach(k=>{
@@ -323,24 +559,30 @@ function renderAdminTests(){
     if(!confirm('इस टेस्ट को हटाएँ?'))return;
 
     try{
-      await api('/api/admin/tests/'+encodeURIComponent(b.dataset.delete),{method:'DELETE'});
+      await api('/api/admin/tests/'+encodeURIComponent(b.dataset.delete),{
+        method:'DELETE'
+      });
+
       await loadPublic();
       await loadAdmin();
+
       notice('टेस्ट हटा दिया गया।','success');
+
     }catch(e){
       notice(e.message,'error');
     }
   });
 }
 
+/* Bookings */
 function renderBookings(){
-  const list=[...adminData.bookings].reverse();
+  const list=[...(adminData?.bookings||[])].reverse();
 
   $('#bookingsList').innerHTML=list.length
     ?list.map(b=>`<div class="booking-item">
       <b>${esc(b.name)} · ${esc(b.id)}</b>
       <p>${esc(b.phone)} · ${esc(b.collection==='home'?'होम कलेक्शन':'लैब विजिट')} · ${new Date(b.createdAt).toLocaleString('en-IN')}</p>
-      <p>${b.tests.map(t=>esc(t.name)).join(', ')}</p>
+      <p>${(b.tests||[]).map(t=>esc(t.name)).join(', ')}</p>
       <p><b>${money(b.total)}</b> · पेमेंट: ${esc(b.paymentStatus)} · <span class="status">${esc(b.status)}</span></p>
       <div class="small-actions">
         <select data-status="${esc(b.id)}">
@@ -374,22 +616,23 @@ function renderBookings(){
   });
 }
 
+/* Admin Tabs */
 $$('.tab').forEach(b=>b.onclick=()=>{
   $$('.tab').forEach(x=>x.classList.toggle('active',x===b));
-  $$('.admin-section').forEach(s=>s.classList.toggle('hidden',s.id!==b.dataset.tab));
+  $$('.admin-section').forEach(s=>
+    s.classList.toggle('hidden',s.id!==b.dataset.tab)
+  );
 });
 
-function notice(t,c){
-  $('#adminNotice').textContent=t;
-  $('#adminNotice').className=c||'';
-}
-
+/* Logout */
 $('#logout').onclick=async()=>{
   try{
     await api('/api/admin/logout',{method:'POST'});
   }catch{}
 
   adminToken='';
+  adminData=null;
+
   $('#adminPane').classList.add('hidden');
   $('#loginPane').classList.remove('hidden');
 };
@@ -408,7 +651,10 @@ loadPublic().catch(e=>{
 });
 
 window.addEventListener('offline',()=>{
-  showMessage('आप ऑफलाइन हैं। वेबसाइट का कुछ हिस्सा खुल सकता है, लेकिन बुकिंग भेजने के लिए इंटरनेट जरूरी है।','error');
+  showMessage(
+    'आप ऑफलाइन हैं। वेबसाइट का कुछ हिस्सा खुल सकता है, लेकिन बुकिंग भेजने के लिए इंटरनेट जरूरी है।',
+    'error'
+  );
 });
 
 window.addEventListener('online',()=>{
