@@ -7,16 +7,48 @@ const path = require('path');
 const crypto = require('crypto');
 const rateLimit = require('express-rate-limit');
 const Razorpay = require('razorpay');
+const multer = require('multer');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 const DB = path.join(__dirname, 'data', 'db.json');
+const UPLOAD_DIR = path.join(__dirname, 'public', 'uploads');
+
+fs.mkdirSync(path.dirname(DB), { recursive: true });
+fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 
 app.use(express.json({ limit: '100kb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 app.use('/api/', rateLimit({ windowMs: 60 * 1000, max: 100 }));
 
 const sessions = new Map();
+
+const qrStorage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, UPLOAD_DIR),
+  filename: (req, file, cb) => {
+    const ext = {
+      'image/png': '.png',
+      'image/jpeg': '.jpg',
+      'image/webp': '.webp'
+    }[file.mimetype];
+
+    cb(null, 'upi-qr' + ext);
+  }
+});
+
+const qrUpload = multer({
+  storage: qrStorage,
+  limits: { fileSize: 2 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    const allowed = ['image/png', 'image/jpeg', 'image/webp'];
+
+    if (!allowed.includes(file.mimetype)) {
+      return cb(new Error('केवल PNG, JPG या WebP image अपलोड करें।'));
+    }
+
+    cb(null, true);
+  }
+});
 
 function readDB() {
   const db = JSON.parse(fs.readFileSync(DB, 'utf8'));
@@ -25,13 +57,8 @@ function readDB() {
     db.settings = {};
   }
 
-  if (!Array.isArray(db.tests)) {
-    db.tests = [];
-  }
-
-  if (!Array.isArray(db.bookings)) {
-    db.bookings = [];
-  }
+  if (!Array.isArray(db.tests)) db.tests = [];
+  if (!Array.isArray(db.bookings)) db.bookings = [];
 
   return db;
 }
@@ -65,6 +92,13 @@ function razorpay() {
   });
 }
 
+function removeOldQr() {
+  for (const ext of ['.png', '.jpg', '.webp']) {
+    const file = path.join(UPLOAD_DIR, 'upi-qr' + ext);
+    if (fs.existsSync(file)) fs.unlinkSync(file);
+  }
+}
+
 app.get('/api/public', (req, res) => {
   try {
     const db = readDB();
@@ -72,12 +106,15 @@ app.get('/api/public', (req, res) => {
     res.json({
       settings: {
         ...db.settings,
-        gatewayEnabled: !!razorpay()
+        gatewayEnabled:
+          db.settings.razorpayEnabled === true && !!razorpay()
       },
       tests: db.tests.filter(t => t.active)
     });
   } catch (e) {
-    res.status(500).json({ error: 'वेबसाइट का डेटा लोड नहीं हो सका' });
+    res.status(500).json({
+      error: 'वेबसाइट का डेटा लोड नहीं हो सका'
+    });
   }
 });
 
@@ -112,7 +149,6 @@ app.post('/api/admin/login', (req, res) => {
 app.post('/api/admin/logout', admin, (req, res) => {
   const token = (req.headers.authorization || '').replace(/^Bearer\s+/, '');
   sessions.delete(token);
-
   res.json({ ok: true });
 });
 
@@ -121,6 +157,72 @@ app.get('/api/admin/data', admin, (req, res) => {
     res.json(readDB());
   } catch (e) {
     res.status(500).json({ error: 'Admin डेटा लोड नहीं हो सका' });
+  }
+});
+
+/* QR upload: admin login जरूरी */
+app.post('/api/admin/upi-qr', admin, (req, res) => {
+  qrUpload.single('qr')(req, res, err => {
+    if (err) {
+      const message =
+        err.code === 'LIMIT_FILE_SIZE'
+          ? 'QR image 2 MB से छोटी होनी चाहिए।'
+          : err.message || 'QR upload नहीं हो सका।';
+
+      return res.status(400).json({ error: message });
+    }
+
+    try {
+      if (!req.file) {
+        return res.status(400).json({
+          error: 'QR image चुनकर अपलोड करें।'
+        });
+      }
+
+      const db = readDB();
+
+      // पुरानी QR image को नई image से बदलें।
+      for (const ext of ['.png', '.jpg', '.webp']) {
+        const oldFile = path.join(UPLOAD_DIR, 'upi-qr' + ext);
+
+        if (oldFile !== req.file.path && fs.existsSync(oldFile)) {
+          fs.unlinkSync(oldFile);
+        }
+      }
+
+      db.settings.upiQrImage = '/uploads/' + req.file.filename;
+      db.settings.upiQrEnabled = true;
+
+      writeDB(db);
+
+      res.json({
+        ok: true,
+        qrImage: db.settings.upiQrImage,
+        message: 'QR upload हो गया।'
+      });
+    } catch (e) {
+      res.status(500).json({ error: 'QR सेव नहीं हो सका।' });
+    }
+  });
+});
+
+/* QR delete: admin login जरूरी */
+app.delete('/api/admin/upi-qr', admin, (req, res) => {
+  try {
+    const db = readDB();
+
+    removeOldQr();
+    db.settings.upiQrImage = '';
+    db.settings.upiQrEnabled = false;
+
+    writeDB(db);
+
+    res.json({
+      ok: true,
+      message: 'QR हटा दिया गया।'
+    });
+  } catch (e) {
+    res.status(500).json({ error: 'QR हटाया नहीं जा सका।' });
   }
 });
 
@@ -138,15 +240,30 @@ app.put('/api/admin/settings', admin, (req, res) => {
       'homeCollectionFee',
       'logoText',
       'accent',
-      'upiId'
+      'upiId',
+      'upiEnabled',
+      'upiIntentEnabled',
+      'upiQrEnabled',
+      'razorpayEnabled'
     ];
 
     for (const k of allowed) {
-      if (s[k] !== undefined) {
-        db.settings[k] = ['bookingFee', 'homeCollectionFee'].includes(k)
-          ? Math.max(0, Number(s[k]) || 0)
-          : String(s[k]).slice(0, 500);
+      if (s[k] === undefined) continue;
+
+      if (['bookingFee', 'homeCollectionFee'].includes(k)) {
+        db.settings[k] = Math.max(0, Number(s[k]) || 0);
+      } else if (
+        ['upiEnabled', 'upiIntentEnabled', 'upiQrEnabled', 'razorpayEnabled'].includes(k)
+      ) {
+        db.settings[k] = s[k] === true;
+      } else {
+        db.settings[k] = String(s[k] ?? '').slice(0, 500);
       }
+    }
+
+    // Razorpay केवल keys configure होने पर और explicitly enabled होने पर चलेगा।
+    if (db.settings.razorpayEnabled !== true) {
+      db.settings.razorpayEnabled = false;
     }
 
     writeDB(db);
@@ -182,11 +299,8 @@ app.post('/api/admin/tests', admin, (req, res) => {
 
     const i = db.tests.findIndex(x => x.id === item.id);
 
-    if (i >= 0) {
-      db.tests[i] = item;
-    } else {
-      db.tests.push(item);
-    }
+    if (i >= 0) db.tests[i] = item;
+    else db.tests.push(item);
 
     writeDB(db);
     res.json({ test: item });
@@ -232,7 +346,9 @@ app.patch('/api/admin/bookings/:id', admin, (req, res) => {
     writeDB(db);
     res.json({ booking: b });
   } catch (e) {
-    res.status(500).json({ error: 'बुकिंग की स्थिति सेव नहीं हुई' });
+    res.status(500).json({
+      error: 'बुकिंग की स्थिति सेव नहीं हुई'
+    });
   }
 });
 
@@ -300,11 +416,6 @@ app.post('/api/whatsapp-booking', (req, res) => {
     booking.status = 'WhatsApp Pending';
     booking.paymentStatus = 'Pay at lab';
 
-    // सुरक्षा: बुकिंग सूची न होने पर नई खाली सूची बनाओ।
-    if (!Array.isArray(db.bookings)) {
-      db.bookings = [];
-    }
-
     db.bookings.push(booking);
     writeDB(db);
 
@@ -328,9 +439,9 @@ app.post('/api/checkout', async (req, res) => {
     const booking = buildBooking(req.body || {}, db);
     const rp = razorpay();
 
-    if (!rp) {
+    if (db.settings.razorpayEnabled !== true || !rp) {
       return res.status(503).json({
-        error: 'ऑनलाइन पेमेंट चालू नहीं है। Admin/owner को Razorpay keys सेट करनी होंगी।'
+        error: 'Razorpay अभी बंद है।'
       });
     }
 
@@ -345,11 +456,6 @@ app.post('/api/checkout', async (req, res) => {
     });
 
     booking.orderId = order.id;
-
-    if (!Array.isArray(db.bookings)) {
-      db.bookings = [];
-    }
-
     db.bookings.push(booking);
     writeDB(db);
 
@@ -452,7 +558,9 @@ app.get('/api/booking/:id', (req, res) => {
       date: b.date
     });
   } catch (e) {
-    res.status(500).json({ error: 'बुकिंग की जानकारी नहीं मिल सकी' });
+    res.status(500).json({
+      error: 'बुकिंग की जानकारी नहीं मिल सकी'
+    });
   }
 });
 
