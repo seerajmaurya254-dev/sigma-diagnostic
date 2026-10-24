@@ -1,0 +1,12 @@
+{
+  "name": "Sigma Diagnostic Test Booking",
+  "short_name": "Sigma Diagnostic",
+  "description": "WhatsApp से लैब टेस्ट बुकिंग",
+  "lang": "hi-IN",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f5f8fa",
+  "theme_color": "#087f8c",
+  "icons": [{"src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable"}]
+}
