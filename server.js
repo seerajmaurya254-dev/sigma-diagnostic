@@ -1,4 +1,3 @@
-
 require('dotenv').config();
 
 const express = require('express');
@@ -92,6 +91,153 @@ function razorpay() {
   });
 }
 
+/*
+ * WhatsApp Cloud API helpers
+ *
+ * Required environment variables:
+ * WHATSAPP_TOKEN
+ * WHATSAPP_PHONE_NUMBER_ID
+ * WHATSAPP_TEMPLATE_NAME
+ *
+ * Optional:
+ * WHATSAPP_API_VERSION
+ * WHATSAPP_TEMPLATE_LANGUAGE
+ */
+
+function getWhatsAppPhone(phone) {
+  let number = String(phone || '').replace(/\D/g, '');
+
+  if (number.startsWith('0')) {
+    number = number.replace(/^0+/, '');
+  }
+
+  // भारत का 10 अंकों वाला मोबाइल नंबर
+  if (number.length === 10) {
+    number = '91' + number;
+  }
+
+  // International format में country code सहित नंबर
+  if (number.length < 11 || number.length > 15) {
+    throw new Error('मरीज का WhatsApp मोबाइल नंबर सही नहीं है।');
+  }
+
+  return number;
+}
+
+async function sendWhatsAppConfirmation(booking) {
+  const token = process.env.WHATSAPP_TOKEN;
+  const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
+  const templateName = process.env.WHATSAPP_TEMPLATE_NAME;
+
+  if (!token || !phoneNumberId || !templateName) {
+    return {
+      sent: false,
+      reason: 'WhatsApp Cloud API की Environment Variables सेट नहीं हैं।'
+    };
+  }
+
+  if (typeof fetch !== 'function') {
+    return {
+      sent: false,
+      reason: 'Server पर WhatsApp API के लिए Node.js fetch उपलब्ध नहीं है।'
+    };
+  }
+
+  let recipient;
+
+  try {
+    recipient = getWhatsAppPhone(booking.phone);
+  } catch (error) {
+    return {
+      sent: false,
+      reason: error.message
+    };
+  }
+
+  const apiVersion = process.env.WHATSAPP_API_VERSION || 'v23.0';
+  const languageCode = process.env.WHATSAPP_TEMPLATE_LANGUAGE || 'hi';
+
+  const dateTime = [booking.date, booking.time]
+    .filter(Boolean)
+    .join(' ');
+
+  const payload = {
+    messaging_product: 'whatsapp',
+    recipient_type: 'individual',
+    to: recipient,
+    type: 'template',
+    template: {
+      name: templateName,
+      language: {
+        code: languageCode
+      },
+      components: [
+        {
+          type: 'body',
+          parameters: [
+            {
+              type: 'text',
+              text: String(booking.name || 'मरीज').slice(0, 100)
+            },
+            {
+              type: 'text',
+              text: String(booking.id || '').slice(0, 100)
+            },
+            {
+              type: 'text',
+              text: String(dateTime || 'लैब से संपर्क करें').slice(0, 100)
+            }
+          ]
+        }
+      ]
+    }
+  };
+
+  try {
+    const response = await fetch(
+      `https://graph.facebook.com/${apiVersion}/${phoneNumberId}/messages`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(payload)
+      }
+    );
+
+    const result = await response.json().catch(() => ({}));
+
+    if (!response.ok) {
+      console.error(
+        'WhatsApp API error:',
+        response.status,
+        JSON.stringify(result.error || result)
+      );
+
+      return {
+        sent: false,
+        reason:
+          result.error?.message ||
+          `WhatsApp API ने अनुरोध स्वीकार नहीं किया (${response.status})।`
+      };
+    }
+
+    return {
+      sent: true,
+      messageId: result.messages?.[0]?.id || '',
+      sentAt: new Date().toISOString()
+    };
+  } catch (error) {
+    console.error('WhatsApp request failed:', error.message);
+
+    return {
+      sent: false,
+      reason: 'WhatsApp API से कनेक्शन नहीं हो सका।'
+    };
+  }
+}
+
 function removeOldQr() {
   for (const ext of ['.png', '.jpg', '.webp']) {
     const file = path.join(UPLOAD_DIR, 'upi-qr' + ext);
@@ -181,7 +327,6 @@ app.post('/api/admin/upi-qr', admin, (req, res) => {
 
       const db = readDB();
 
-      // पुरानी QR image को नई image से बदलें।
       for (const ext of ['.png', '.jpg', '.webp']) {
         const oldFile = path.join(UPLOAD_DIR, 'upi-qr' + ext);
 
@@ -253,7 +398,12 @@ app.put('/api/admin/settings', admin, (req, res) => {
       if (['bookingFee', 'homeCollectionFee'].includes(k)) {
         db.settings[k] = Math.max(0, Number(s[k]) || 0);
       } else if (
-        ['upiEnabled', 'upiIntentEnabled', 'upiQrEnabled', 'razorpayEnabled'].includes(k)
+        [
+          'upiEnabled',
+          'upiIntentEnabled',
+          'upiQrEnabled',
+          'razorpayEnabled'
+        ].includes(k)
       ) {
         db.settings[k] = s[k] === true;
       } else {
@@ -261,7 +411,6 @@ app.put('/api/admin/settings', admin, (req, res) => {
       }
     }
 
-    // Razorpay केवल keys configure होने पर और explicitly enabled होने पर चलेगा।
     if (db.settings.razorpayEnabled !== true) {
       db.settings.razorpayEnabled = false;
     }
@@ -321,7 +470,11 @@ app.delete('/api/admin/tests/:id', admin, (req, res) => {
   }
 });
 
-app.patch('/api/admin/bookings/:id', admin, (req, res) => {
+/*
+ * Booking status update.
+ * Confirmed होते ही WhatsApp template message भेजने की कोशिश होगी।
+ */
+app.patch('/api/admin/bookings/:id', admin, async (req, res) => {
   try {
     const db = readDB();
     const b = db.bookings.find(x => x.id === req.params.id);
@@ -339,13 +492,42 @@ app.patch('/api/admin/bookings/:id', admin, (req, res) => {
       'Payment Pending'
     ];
 
-    if (allowedStatuses.includes(req.body.status)) {
-      b.status = req.body.status;
+    if (!allowedStatuses.includes(req.body.status)) {
+      return res.status(400).json({
+        error: 'बुकिंग का स्टेटस सही नहीं है।'
+      });
+    }
+
+    b.status = req.body.status;
+    let whatsapp = {
+      sent: false,
+      reason: 'WhatsApp confirmation की जरूरत नहीं थी।'
+    };
+
+    // पहले भेजा जा चुका हो तो दोबारा अपने-आप न भेजें।
+    if (b.status === 'Confirmed' && !b.whatsappConfirmationSentAt) {
+      const result = await sendWhatsAppConfirmation(b);
+
+      if (result.sent) {
+        b.whatsappConfirmationSentAt = result.sentAt;
+        b.whatsappMessageId = result.messageId;
+        b.whatsappConfirmationError = '';
+      } else {
+        b.whatsappConfirmationError = result.reason;
+      }
+
+      whatsapp = result;
     }
 
     writeDB(db);
-    res.json({ booking: b });
+
+    res.json({
+      booking: b,
+      whatsapp
+    });
   } catch (e) {
+    console.error('Booking update error:', e.message);
+
     res.status(500).json({
       error: 'बुकिंग की स्थिति सेव नहीं हुई'
     });
